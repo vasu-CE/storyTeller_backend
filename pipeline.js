@@ -6,12 +6,6 @@ import { detectMilestones } from './agents/milestoneAgent.js';
 import { generateNarrative } from './agents/narrativeAgent.js';
 import { analyzeContributors } from './agents/contributorAgent.js';
 
-/**
- * Main pipeline to analyze a repository and generate narrative
- * @param {string} repoUrl - GitHub/GitLab repository URL
- * @param {Function} progressCallback - Optional callback for progress updates
- * @returns {Promise<Object>} Complete analysis result
- */
 export async function analyzePipeline(repoUrl, progressCallback = null) {
   try {
     // Step 1: Extract commits
