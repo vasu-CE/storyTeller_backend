@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { analyzePipeline } from '../pipeline.js';
 
 const router = express.Router();
+const inFlightAnalysis = new Map();
 
 // Validation schema
 const repoUrlSchema = z.object({
@@ -22,12 +23,25 @@ router.post('/analyze', async (req, res) => {
     }
     
     const { repoUrl } = validation.data;
+    const normalizedRepoUrl = repoUrl.trim();
     
-    console.log(`Analyzing repository: ${repoUrl}`);
+    console.log(`Analyzing repository: ${normalizedRepoUrl}`);
+    
+    if (inFlightAnalysis.has(normalizedRepoUrl)) {
+      console.log(`Reusing in-flight analysis for: ${normalizedRepoUrl}`);
+      const existingResult = await inFlightAnalysis.get(normalizedRepoUrl);
+      return res.json(existingResult);
+    }
     
     // Run analysis pipeline
-    const result = await analyzePipeline(repoUrl);
-    console.log(result);
+    const analysisPromise = analyzePipeline(normalizedRepoUrl)
+      .finally(() => {
+        inFlightAnalysis.delete(normalizedRepoUrl);
+      });
+
+    inFlightAnalysis.set(normalizedRepoUrl, analysisPromise);
+
+    const result = await analysisPromise;
     res.json(result);
     
   } catch (error) {
