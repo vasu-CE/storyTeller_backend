@@ -121,6 +121,7 @@ export function classifyCommits(commits) {
   const stabilizationPeriods = detectStabilizationPeriods(commits);
   const architecturalChanges = detectArchitecturalChanges(commits);
   const velocityData = calculateCommitVelocity(commits);
+  const codeChangeInterpretation = analyzeCodeChangeInterpretation(commits);
 
   return {
     classification,
@@ -130,8 +131,88 @@ export function classifyCommits(commits) {
     stabilizationPeriods,
     architecturalChanges,
     velocityData,
+    codeChangeInterpretation,
     total: commits.length,
   };
+}
+
+export function analyzeCodeChangeInterpretation(commits) {
+  const categories = {
+    new_module_or_component_introduction: 0,
+    large_scale_refactoring: 0,
+    file_restructuring: 0,
+    configuration_updates: 0,
+    test_suite_additions: 0,
+    infrastructure_or_build_system_changes: 0,
+  };
+
+  const interpretedCommits = [];
+
+  for (const commit of (commits || [])) {
+    const interpretation = commit?.codeChangeInterpretation;
+    if (!interpretation || !Array.isArray(interpretation.categories)) {
+      continue;
+    }
+
+    for (const category of interpretation.categories) {
+      if (Object.prototype.hasOwnProperty.call(categories, category)) {
+        categories[category] += 1;
+      }
+    }
+
+    interpretedCommits.push({
+      hash: commit.hash,
+      date: commit.date,
+      message: commit.message,
+      categories: interpretation.categories,
+      impactSummary: interpretation.impactSummary,
+      impactMagnitude: (commit.insertions || 0) + (commit.deletions || 0),
+    });
+  }
+
+  const majorImpactEvents = interpretedCommits
+    .sort((a, b) => b.impactMagnitude - a.impactMagnitude)
+    .slice(0, 20)
+    .map(({ impactMagnitude, ...event }) => event);
+
+  const systemImpactSummary = buildSystemImpactSummary(categories, interpretedCommits.length);
+
+  return {
+    categories,
+    interpretedCommits: interpretedCommits.length,
+    majorImpactEvents,
+    systemImpactSummary,
+  };
+}
+
+function buildSystemImpactSummary(categories, interpretedCount) {
+  const lines = [];
+
+  if (categories.new_module_or_component_introduction > 0) {
+    lines.push(`Feature surface expanded through ${categories.new_module_or_component_introduction} module/component introduction commits.`);
+  }
+  if (categories.large_scale_refactoring > 0) {
+    lines.push(`Architecture and internal quality were reshaped by ${categories.large_scale_refactoring} large-scale refactoring efforts.`);
+  }
+  if (categories.file_restructuring > 0) {
+    lines.push(`Repository organization evolved in ${categories.file_restructuring} restructuring commits, improving project layout and maintainability.`);
+  }
+  if (categories.configuration_updates > 0) {
+    lines.push(`Operational behavior was tuned via ${categories.configuration_updates} configuration updates.`);
+  }
+  if (categories.test_suite_additions > 0) {
+    lines.push(`Reliability posture improved with ${categories.test_suite_additions} test-suite expansion commits.`);
+  }
+  if (categories.infrastructure_or_build_system_changes > 0) {
+    lines.push(`Delivery pipeline maturity advanced through ${categories.infrastructure_or_build_system_changes} infrastructure/build-system changes.`);
+  }
+
+  if (lines.length === 0) {
+    lines.push('No specialized diff-interpretation categories were detected; changes appear primarily incremental.');
+  }
+
+  lines.push(`Interpretation coverage: ${interpretedCount} commits with explicit code-change impact classification.`);
+  return lines;
 }
 
 // ---------------------------------------------------------------------------

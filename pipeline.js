@@ -126,6 +126,7 @@ export async function analyzePipeline(repoUrl, progressCallback = null) {
       architecturalChanges: classification.architecturalChanges,
       stabilizationPeriods: classification.stabilizationPeriods,
       velocityData: classification.velocityData,
+      codeChangeInterpretation: classification.codeChangeInterpretation,
       firstOccurrences,
     };
     

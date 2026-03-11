@@ -136,6 +136,31 @@ export function buildContext(analysisResult) {
     commitHighlights || 'No commit highlights available.'
   ].join('\n');
 
+  const codeChangeInterpretation = analysisResult?.codeChangeInterpretation || {};
+  const changeCategories = codeChangeInterpretation?.categories || {};
+  const impactLines = Array.isArray(codeChangeInterpretation?.systemImpactSummary)
+    ? codeChangeInterpretation.systemImpactSummary
+    : [];
+  const majorImpactEvents = Array.isArray(codeChangeInterpretation?.majorImpactEvents)
+    ? codeChangeInterpretation.majorImpactEvents
+    : [];
+
+  const interpretationSection = Object.keys(changeCategories).length > 0
+    ? '\n\n=== CODE CHANGE INTERPRETATION ===\n' +
+      [
+        'Category counts:',
+        ...Object.entries(changeCategories).map(([category, count]) => `- ${category.replace(/_/g, ' ')}: ${count}`),
+        '',
+        'System impact summary:',
+        ...(impactLines.length > 0 ? impactLines.map((line) => `- ${line}`) : ['- No impact summary available.']),
+        '',
+        'Representative high-impact changes:',
+        ...(majorImpactEvents.slice(0, 8).map((event) =>
+          `- ${new Date(event.date).toLocaleDateString('en-US', { year: 'numeric', month: 'short' })}: ${event.message} | categories: ${toList(event.categories, 'none')} | ${event.impactSummary || 'No impact narrative.'}`
+        )),
+      ].join('\n')
+    : '';
+
   // Append architectural change timeline if present
   const archChanges = Array.isArray(analysisResult?.architecturalChanges) ? analysisResult.architecturalChanges : [];
   const archTimeline = archChanges.length > 0
@@ -155,7 +180,7 @@ export function buildContext(analysisResult) {
       }).join('\n')
     : '';
 
-  const finalContext = context + archTimeline + firstOccTimeline;
+  const finalContext = context + interpretationSection + archTimeline + firstOccTimeline;
   console.log(`buildContext: built context with ${finalContext.length} characters`);
   return finalContext;
 }

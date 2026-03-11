@@ -32,7 +32,9 @@ export async function extractCommits(repoUrl) {
     const commits = [];
     for (const commit of log.all) {
       const stats = await repoGit.show(['--numstat', '--format=', commit.hash]);
+      const nameStatus = await repoGit.show(['--name-status', '--format=', commit.hash]);
       const files = parseGitStats(stats);
+      const statusEntries = parseGitNameStatus(nameStatus);
       const allFiles = files.map(f => f.file);
       const totalInsertions = files.reduce((sum, f) => sum + f.insertions, 0);
       const totalDeletions  = files.reduce((sum, f) => sum + f.deletions, 0);
@@ -46,10 +48,19 @@ export async function extractCommits(repoUrl) {
         insertions: totalInsertions,
         deletions: totalDeletions,
         files: allFiles,
+        fileStatus: statusEntries,
         architecturalSignals: detectArchitecturalSignals(
           allFiles, commit.message, totalInsertions, totalDeletions, files.length
         ),
         fileTypes: categorizeFileTypes(allFiles),
+        codeChangeInterpretation: interpretCodeChange(
+          allFiles,
+          statusEntries,
+          commit.message,
+          totalInsertions,
+          totalDeletions,
+          files.length
+        ),
       });
     }
 
@@ -295,4 +306,178 @@ function parseGitStats(stats) {
   }
 
   return files;
+}
+
+function parseGitNameStatus(output) {
+  const lines = String(output || '').trim().split('\n').filter(line => line.trim());
+  const entries = [];
+
+  for (const line of lines) {
+    const parts = line.split('\t');
+    if (parts.length < 2) continue;
+
+    const rawStatus = parts[0];
+    const status = rawStatus[0];
+
+    if ((status === 'R' || status === 'C') && parts.length >= 3) {
+      entries.push({
+        status,
+        score: parseInt(rawStatus.slice(1), 10) || null,
+        from: parts[1],
+        to: parts[2],
+        file: parts[2],
+      });
+      continue;
+    }
+
+    entries.push({
+      status,
+      score: null,
+      from: null,
+      to: parts[1],
+      file: parts[1],
+    });
+  }
+
+  return entries;
+}
+
+function interpretCodeChange(files, statusEntries, message, insertions, deletions, filesChanged) {
+  const categories = new Set();
+  const msg = String(message || '').toLowerCase();
+
+  const added = statusEntries.filter((f) => f.status === 'A');
+  const renamedOrCopied = statusEntries.filter((f) => f.status === 'R' || f.status === 'C');
+  const deleted = statusEntries.filter((f) => f.status === 'D');
+
+  const addedComponentLike = added.filter(({ file }) => {
+    const lower = String(file || '').toLowerCase();
+    return (
+      lower.includes('/components/') ||
+      lower.includes('/modules/') ||
+      lower.includes('/services/') ||
+      lower.includes('/features/') ||
+      /component|module|service|feature/.test(lower)
+    );
+  });
+
+  if (addedComponentLike.length > 0 || /introduc|implement|new module|new component|bootstrap/.test(msg)) {
+    categories.add('new_module_or_component_introduction');
+  }
+
+  const refactorMessage = /refactor|rewrite|re-?architect|overhaul|cleanup|rework/.test(msg);
+  const heavyChange = filesChanged >= 12 && insertions + deletions >= 400;
+  if (refactorMessage || heavyChange) {
+    categories.add('large_scale_refactoring');
+  }
+
+  if (renamedOrCopied.length >= 2 || (deleted.length >= 3 && added.length >= 3) || /restructure|reorganize|move files?|folder layout/.test(msg)) {
+    categories.add('file_restructuring');
+  }
+
+  const configTouched = files.some((file) => {
+    const lower = String(file || '').toLowerCase();
+    return (
+      lower.endsWith('.json') ||
+      lower.endsWith('.yaml') ||
+      lower.endsWith('.yml') ||
+      lower.endsWith('.toml') ||
+      lower.endsWith('.ini') ||
+      lower.endsWith('.env') ||
+      lower.endsWith('.env.example') ||
+      lower.includes('config') ||
+      lower.includes('settings') ||
+      lower.endsWith('package.json') ||
+      lower.endsWith('tsconfig.json') ||
+      lower.endsWith('eslint.config.js')
+    );
+  });
+  if (configTouched) {
+    categories.add('configuration_updates');
+  }
+
+  const testAdded = added.some(({ file }) => {
+    const lower = String(file || '').toLowerCase();
+    return (
+      lower.includes('/test') ||
+      lower.includes('/spec') ||
+      lower.endsWith('.test.js') ||
+      lower.endsWith('.spec.js') ||
+      lower.endsWith('.test.ts') ||
+      lower.endsWith('.spec.ts') ||
+      lower.endsWith('.test.py') ||
+      lower.endsWith('.spec.py')
+    );
+  });
+  if (testAdded || /add.*test|test suite|coverage/.test(msg)) {
+    categories.add('test_suite_additions');
+  }
+
+  const infraTouched = files.some((file) => {
+    const lower = String(file || '').toLowerCase();
+    return (
+      lower.includes('.github/workflows') ||
+      lower.includes('dockerfile') ||
+      lower.includes('docker-compose') ||
+      lower.includes('jenkinsfile') ||
+      lower.includes('pipeline') ||
+      lower.includes('k8s') ||
+      lower.includes('terraform') ||
+      lower.includes('helm') ||
+      lower.includes('.gitlab-ci') ||
+      lower.includes('build.gradle') ||
+      lower.includes('pom.xml')
+    );
+  });
+  if (infraTouched) {
+    categories.add('infrastructure_or_build_system_changes');
+  }
+
+  const impactSummary = summarizeChangeImpact({ categories: [...categories], filesChanged, insertions, deletions, renamedCount: renamedOrCopied.length, testAdded });
+
+  return {
+    categories: [...categories],
+    impactSummary,
+    metrics: {
+      filesChanged,
+      insertions,
+      deletions,
+      addedFiles: added.length,
+      deletedFiles: deleted.length,
+      renamedOrCopied: renamedOrCopied.length,
+    },
+  };
+}
+
+function summarizeChangeImpact({ categories, filesChanged, insertions, deletions, renamedCount, testAdded }) {
+  const parts = [];
+
+  if (categories.includes('new_module_or_component_introduction')) {
+    parts.push('Introduced new functional surface area, expanding system capabilities.');
+  }
+  if (categories.includes('large_scale_refactoring')) {
+    parts.push('Reshaped significant code paths to improve maintainability and long-term evolvability.');
+  }
+  if (categories.includes('file_restructuring')) {
+    parts.push('Reorganized repository structure to improve discoverability and ownership boundaries.');
+  }
+  if (categories.includes('configuration_updates')) {
+    parts.push('Adjusted runtime/build configuration, likely altering deployment or behavior defaults.');
+  }
+  if (categories.includes('test_suite_additions')) {
+    parts.push('Increased verification coverage, reducing regression risk in future iterations.');
+  }
+  if (categories.includes('infrastructure_or_build_system_changes')) {
+    parts.push('Changed delivery/tooling infrastructure, affecting release reliability and automation.');
+  }
+
+  if (parts.length === 0) {
+    if (filesChanged >= 8 || insertions + deletions >= 250) {
+      return 'Made broad cross-cutting updates with moderate to high system impact.';
+    }
+    return 'Applied focused incremental changes with localized system impact.';
+  }
+
+  const quantitativeTail = `Scope: ${filesChanged} files, +${insertions}/-${deletions} lines${renamedCount ? `, ${renamedCount} moved/renamed` : ''}${testAdded ? ', test coverage expanded' : ''}.`;
+  return `${parts.join(' ')} ${quantitativeTail}`;
 }
