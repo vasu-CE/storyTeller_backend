@@ -29,6 +29,7 @@ app.get('/', (req, res) => {
     endpoints: {
       health: 'GET /api/health',
       analyze: 'POST /api/analyze',
+      repositories: 'GET /api/repositories',
       chat: 'POST /api/chat'
     }
   });
@@ -48,6 +49,7 @@ app.listen(PORT, () => {
   console.log(`✅ Server started at http://localhost:${PORT}`);
   console.log(`📊 API endpoints:`);
   console.log(`   - GET  /api/health`);
+  console.log(`   - GET  /api/repositories`);
   console.log(`   - POST /api/analyze`);
   console.log(`   - POST /api/chat`);
   

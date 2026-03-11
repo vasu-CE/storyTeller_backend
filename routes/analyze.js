@@ -1,6 +1,8 @@
 import express from 'express';
 import { z } from 'zod';
 import { analyzePipeline } from '../pipeline.js';
+import { getCachedAnalysis, listStoredRepositories, storeAnalysisResult } from '../utils/repositoryCache.js';
+import { normalizeRepoUrl } from '../git/repositoryState.js';
 
 const router = express.Router();
 const inFlightAnalysis = new Map();
@@ -15,9 +17,49 @@ const STEP_PROGRESS = {
 };
 
 // Validation schema
-const repoUrlSchema = z.object({
-  repoUrl: z.string().url('Invalid URL format')
+const analyzeRequestSchema = z.object({
+  repoUrl: z.string().url('Invalid URL format'),
+  forceSync: z.union([z.boolean(), z.string()]).optional().default(false)
 });
+
+function parseForceSync(value) {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    return value.trim().toLowerCase() === 'true';
+  }
+
+  return false;
+}
+
+async function resolveAnalysis(repoUrl, options = {}) {
+  const { forceSync = false, progressCallback = null } = options;
+  const normalizedRepoUrl = normalizeRepoUrl(repoUrl);
+
+  if (!forceSync) {
+    const cached = await getCachedAnalysis(repoUrl, { checkSync: true });
+
+    if (cached) {
+      return cached.result;
+    }
+  }
+
+  if (inFlightAnalysis.has(normalizedRepoUrl)) {
+    console.log(`Reusing in-flight analysis for: ${normalizedRepoUrl}`);
+    return inFlightAnalysis.get(normalizedRepoUrl);
+  }
+
+  const analysisPromise = analyzePipeline(repoUrl, progressCallback)
+    .then((result) => storeAnalysisResult(repoUrl, result).then(({ result: storedResult }) => storedResult))
+    .finally(() => {
+      inFlightAnalysis.delete(normalizedRepoUrl);
+    });
+
+  inFlightAnalysis.set(normalizedRepoUrl, analysisPromise);
+  return analysisPromise;
+}
 
 function getProgressPercent(progress) {
   if (progress?.step === 'phase') {
@@ -42,8 +84,7 @@ function writeSse(res, payload) {
 
 router.post('/analyze', async (req, res) => {
   try {
-    // Validate request body
-    const validation = repoUrlSchema.safeParse(req.body);
+    const validation = analyzeRequestSchema.safeParse(req.body);
     
     if (!validation.success) {
       return res.status(400).json({
@@ -53,25 +94,12 @@ router.post('/analyze', async (req, res) => {
     }
     
     const { repoUrl } = validation.data;
+    const forceSync = parseForceSync(validation.data.forceSync);
     const normalizedRepoUrl = repoUrl.trim();
     
     console.log(`Analyzing repository: ${normalizedRepoUrl}`);
-    
-    if (inFlightAnalysis.has(normalizedRepoUrl)) {
-      console.log(`Reusing in-flight analysis for: ${normalizedRepoUrl}`);
-      const existingResult = await inFlightAnalysis.get(normalizedRepoUrl);
-      return res.json(existingResult);
-    }
-    
-    // Run analysis pipeline
-    const analysisPromise = analyzePipeline(normalizedRepoUrl)
-      .finally(() => {
-        inFlightAnalysis.delete(normalizedRepoUrl);
-      });
 
-    inFlightAnalysis.set(normalizedRepoUrl, analysisPromise);
-
-    const result = await analysisPromise;
+    const result = await resolveAnalysis(normalizedRepoUrl, { forceSync });
     res.json(result);
     
   } catch (error) {
@@ -105,7 +133,7 @@ router.get('/analyze-stream', async (req, res) => {
   res.flushHeaders();
 
   try {
-    const validation = repoUrlSchema.safeParse(req.query);
+    const validation = analyzeRequestSchema.safeParse(req.query);
 
     if (!validation.success) {
       writeSse(res, { step: 'error', message: 'Invalid URL format' });
@@ -113,17 +141,21 @@ router.get('/analyze-stream', async (req, res) => {
     }
 
     const normalizedRepoUrl = validation.data.repoUrl.trim();
+    const forceSync = parseForceSync(validation.data.forceSync);
     console.log(`Streaming analysis for repository: ${normalizedRepoUrl}`);
 
-    const result = await analyzePipeline(normalizedRepoUrl, (progress) => {
-      if (clientDisconnected || progress?.step === 'complete' || progress?.step === 'error') {
-        return;
-      }
+    const result = await resolveAnalysis(normalizedRepoUrl, {
+      forceSync,
+      progressCallback: (progress) => {
+        if (clientDisconnected || progress?.step === 'complete' || progress?.step === 'error') {
+          return;
+        }
 
-      writeSse(res, {
-        ...progress,
-        percent: getProgressPercent(progress)
-      });
+        writeSse(res, {
+          ...progress,
+          percent: getProgressPercent(progress)
+        });
+      }
     });
 
     if (!clientDisconnected) {
@@ -149,6 +181,15 @@ router.get('/analyze-stream', async (req, res) => {
     if (!res.writableEnded) {
       res.end();
     }
+  }
+});
+
+router.get('/repositories', async (req, res, next) => {
+  try {
+    const repositories = await listStoredRepositories();
+    res.json({ repositories });
+  } catch (error) {
+    next(error);
   }
 });
 

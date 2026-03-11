@@ -6,7 +6,6 @@ import { detectMilestones } from './agents/milestoneAgent.js';
 import { generateNarrative } from './agents/narrativeAgent.js';
 import { analyzeContributors } from './agents/contributorAgent.js';
 import crypto from 'crypto';
-import { saveContext } from './store/contextStore.js';
 
 export async function analyzePipeline(repoUrl, progressCallback = null) {
   try {
@@ -82,6 +81,7 @@ export async function analyzePipeline(repoUrl, progressCallback = null) {
     const repoMeta = {
       url: repoUrl,
       totalCommits: commits.length,
+      latestCommitHash: commits[0]?.hash || null,
       branches,
       tags,
       analyzedAt: new Date().toISOString()
@@ -99,8 +99,6 @@ export async function analyzePipeline(repoUrl, progressCallback = null) {
       contributors,
       classification: classification.summary
     };
-
-    saveContext(sessionId, result);
     
     if (progressCallback) {
       progressCallback({ step: 'complete', message: 'Analysis complete!', result });
