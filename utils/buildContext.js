@@ -89,9 +89,15 @@ export function buildContext(analysisResult) {
 
   const narrativeSummary = [
     `Opening: ${narrative.opening || 'No opening available.'}`,
-    `Development: ${middleSections}`,
-    `Turning Points: ${turningPoints}`,
-    `Current State: ${narrative.current_state || 'No current state available.'}`
+    `Foundation: ${narrative.foundation_phase || ''}`,
+    `Development: ${toArray(narrative.growth_narrative || narrative.middle_sections).join(' | ') || middleSections}`,
+    `Architectural Evolution: ${narrative.architectural_evolution || ''}`,
+    `Collaboration: ${narrative.collaboration_story || ''}`,
+    `Technical Decisions: ${toArray(narrative.technical_decisions).join(' | ')}`,
+    `Stabilisation: ${narrative.stabilization_narrative || ''}`,
+    `Turning Points: ${toArray(narrative.turning_points || narrative.turning_points).join(' | ') || turningPoints}`,
+    `Current State: ${narrative.current_state || 'No current state available.'}`,
+    `Project Character: ${narrative.project_character || ''}`,
   ].join('\n');
 
   const commitHighlights = commits
@@ -130,6 +136,26 @@ export function buildContext(analysisResult) {
     commitHighlights || 'No commit highlights available.'
   ].join('\n');
 
-  console.log(`buildContext: built context with ${context.length} characters`);
-  return context;
+  // Append architectural change timeline if present
+  const archChanges = Array.isArray(analysisResult?.architecturalChanges) ? analysisResult.architecturalChanges : [];
+  const archTimeline = archChanges.length > 0
+    ? '\n\n=== ARCHITECTURAL CHANGE TIMELINE ===\n' +
+      archChanges.slice(0, 15).map(c => {
+        const d = new Date(c.date).toLocaleDateString('en-US', { year: 'numeric', month: 'short' });
+        return `${d} | ${c.author || 'unknown'} | ${c.message} (+${c.insertions}/-${c.deletions})`;
+      }).join('\n')
+    : '';
+
+  const firstOcc = analysisResult?.firstOccurrences || {};
+  const firstOccTimeline = Object.keys(firstOcc).length > 0
+    ? '\n\n=== KEY FIRST-TIME EVENTS ===\n' +
+      Object.entries(firstOcc).map(([event, data]) => {
+        const d = new Date(data.date).toLocaleDateString('en-US', { year: 'numeric', month: 'short' });
+        return `${d}: first ${event.replace(/_/g, ' ')} — "${data.message}"`;
+      }).join('\n')
+    : '';
+
+  const finalContext = context + archTimeline + firstOccTimeline;
+  console.log(`buildContext: built context with ${finalContext.length} characters`);
+  return finalContext;
 }

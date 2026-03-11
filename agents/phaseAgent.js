@@ -47,16 +47,14 @@ function detectPrimaryArea(files = []) {
 
 function buildFallbackPhase(chunk) {
   const commits = chunk.commits || [];
-  const messages = commits.map((commit) => String(commit.message || ''));
-  const allFiles = commits.flatMap((commit) => commit.files || []);
+  const messages = commits.map((c) => String(c.message || ''));
+  const allFiles = commits.flatMap((c) => c.files || []);
 
   const keywordCount = new Map();
   for (const message of messages) {
     for (const rawToken of message.split(/\s+/)) {
       const token = cleanToken(rawToken);
-      if (!token || token.length < 4 || STOP_WORDS.has(token)) {
-        continue;
-      }
+      if (!token || token.length < 4 || STOP_WORDS.has(token)) continue;
       keywordCount.set(token, (keywordCount.get(token) || 0) + 1);
     }
   }
@@ -64,21 +62,27 @@ function buildFallbackPhase(chunk) {
   const topKeywords = [...keywordCount.entries()]
     .sort((a, b) => b[1] - a[1])
     .slice(0, 3)
-    .map(([keyword]) => keyword);
+    .map(([kw]) => kw);
 
-  const area = detectPrimaryArea(allFiles);
-  const totalFilesChanged = commits.reduce((sum, commit) => sum + (Number(commit.filesChanged) || 0), 0);
-  const totalInsertions = commits.reduce((sum, commit) => sum + (Number(commit.insertions) || 0), 0);
-  const totalDeletions = commits.reduce((sum, commit) => sum + (Number(commit.deletions) || 0), 0);
+  // Prefer the richer fileTypeStats from the chunk if available
+  const fileStats = chunk.fileTypeStats || {};
+  const area = Object.entries(fileStats).length > 0
+    ? Object.entries(fileStats).sort(([, a], [, b]) => b - a)[0][0]
+    : detectPrimaryArea(allFiles);
+
+  const totalFilesChanged = commits.reduce((s, c) => s + (Number(c.filesChanged) || 0), 0);
+  const totalInsertions = chunk.totalInsertions ?? commits.reduce((s, c) => s + (Number(c.insertions) || 0), 0);
+  const totalDeletions  = chunk.totalDeletions  ?? commits.reduce((s, c) => s + (Number(c.deletions)  || 0), 0);
 
   let mood = 'building';
-  if (totalDeletions > totalInsertions * 1.2) {
+  const archSignals = chunk.architecturalSignals || [];
+  if (archSignals.includes('refactoring') || totalDeletions > totalInsertions * 1.2) {
     mood = 'refactoring';
-  } else if (messages.some((m) => /^fix:|\bbug\b|hotfix/i.test(m))) {
+  } else if (archSignals.includes('ci_cd') || archSignals.includes('containerization') || archSignals.includes('infrastructure_as_code')) {
+    mood = 'growing';
+  } else if (messages.some((m) => /^fix:|\bbug\b|hotfix|crash|revert/i.test(m))) {
     mood = 'stabilizing';
-  } else if (messages.some((m) => /refactor|cleanup|rewrite/i.test(m))) {
-    mood = 'refactoring';
-  } else if (messages.some((m) => /feat|feature|add|implement/i.test(m))) {
+  } else if (messages.some((m) => /feat|feature|add|implement|introduc/i.test(m))) {
     mood = 'growing';
   }
 
@@ -86,25 +90,41 @@ function buildFallbackPhase(chunk) {
     frontend: 'Interface Expansion',
     backend: 'Core Logic Buildout',
     infra: 'Delivery Pipeline Setup',
+    infrastructure: 'Infrastructure Hardening',
     tests: 'Quality Hardening',
+    testing: 'Quality Hardening',
     docs: 'Documentation Pass',
-    product: 'Product Development'
+    documentation: 'Documentation Pass',
+    database: 'Data Layer Work',
+    config: 'Config & Tooling',
+    styles: 'UI Polish',
+    product: 'Product Development',
+    'full-stack': 'Full-Stack Development',
   };
 
-  const activities = [
-    `Shipped ${chunk.commitCount} commits spanning ${chunk.period}`,
-    `Touched about ${totalFilesChanged} files with ${totalInsertions} insertions and ${totalDeletions} deletions`,
-    topKeywords.length > 0
-      ? `Recurring themes: ${topKeywords.join(', ')}`
-      : `Primary focus area: ${area}`
-  ];
+  // Highlight any architectural signals in this phase
+  const archHighlight = archSignals.includes('database_migration')
+    ? 'This phase introduced or modified database schema.'
+    : archSignals.includes('containerization')
+      ? 'Containerization was introduced or updated in this period.'
+      : archSignals.includes('ci_cd')
+        ? 'CI/CD pipeline work featured prominently in this phase.'
+        : archSignals.includes('refactoring')
+          ? 'A significant refactor shaped the codebase during this period.'
+          : null;
 
   const summaryParts = [
-    `During ${chunk.period}, the team pushed ${chunk.commitCount} commits focused on ${area}.`,
+    `During ${chunk.period}, the team pushed ${chunk.commitCount} commits concentrated on ${area}.`,
     topKeywords.length > 0
-      ? `The commit trail repeatedly highlighted ${topKeywords.join(', ')}, showing a clear direction for this phase.`
-      : `The commit trail shows consistent incremental progress rather than isolated one-off changes.`,
-    `This period changed ${totalFilesChanged} files and carried a ${mood} tone.`
+      ? `The commit trail repeatedly highlighted ${topKeywords.join(', ')}, pointing to a clear direction.`
+      : 'Consistent incremental progress defined this stretch rather than isolated one-off changes.',
+    `${totalFilesChanged} files were touched (+${totalInsertions}/-${totalDeletions} lines), reflecting a ${mood} tone.`,
+  ];
+
+  const activities = [
+    `Shipped ${chunk.commitCount} commits across ${chunk.period}`,
+    archHighlight || (topKeywords.length > 0 ? `Recurring themes: ${topKeywords.join(', ')}` : `Primary focus: ${area}`),
+    `${totalFilesChanged} files changed (+${totalInsertions}/-${totalDeletions} lines)`,
   ];
 
   return {
@@ -113,44 +133,73 @@ function buildFallbackPhase(chunk) {
     summary: summaryParts.join(' '),
     key_activities: activities,
     mood,
+    architectural_impact: archHighlight || null,
+    dominant_area: area,
     startDate: chunk.startDate,
     endDate: chunk.endDate,
-    commitCount: chunk.commitCount
+    commitCount: chunk.commitCount,
+    fileTypeStats: chunk.fileTypeStats,
+    architecturalSignals: chunk.architecturalSignals,
   };
 }
 
 export async function analyzePhase(chunk) {
-  const commitsText = chunk.commits.map(c => 
-    `- ${c.date}: ${c.message} (${c.author.name})`
+  // Sample up to 30 commits for the prompt (keeps token count manageable on large phases)
+  const sample = chunk.commits.slice(0, 30);
+  const commitsText = sample.map(c =>
+    `- ${c.date} [${c.author?.name || 'unknown'}] ${c.message} (+${c.insertions || 0}/-${c.deletions || 0})`
   ).join('\n');
-  
-  const prompt = `Analyze the following Git commits and describe this development phase in a documentary style.
 
-Commits (${chunk.commitCount} total, ${chunk.period}):
+  // File-area breakdown for this phase
+  const fileStats = chunk.fileTypeStats || {};
+  const fileStatsText = Object.entries(fileStats)
+    .filter(([, n]) => n > 0)
+    .sort(([, a], [, b]) => b - a)
+    .map(([type, n]) => `${type}: ${n} files`)
+    .join(', ');
+
+  const archSignals = chunk.architecturalSignals || [];
+  const archContext = archSignals.length > 0
+    ? `\nArchitectural events in this phase: ${archSignals.join(', ')}`
+    : '';
+
+  const prompt = `You are a technical documentary historian studying a software project's Git history.
+
+Phase window: ${chunk.period}
+Commits: ${chunk.commitCount}  |  Lines added: ${chunk.totalInsertions || 0}  |  Lines removed: ${chunk.totalDeletions || 0}
+File areas touched: ${fileStatsText || 'unknown'}${archContext}
+
+Commit sample (newest last):
 ${commitsText}
 
-Return a JSON object with this structure:
+Analyse this phase with depth and context. Infer the team's motivation — not just WHAT they did, but WHY. Identify whether they were exploring, executing on a plan, fighting fires, or rethinking the system.
+
+Return a JSON object with EXACTLY this structure:
 {
-  "phase_name": "a short descriptive name (2-4 words)",
+  "phase_name": "2-4 word name capturing the spirit of this period",
   "period": "${chunk.period}",
-  "summary": "2-3 sentences describing what happened in documentary style",
-  "key_activities": ["activity 1", "activity 2", "activity 3"],
-  "mood": "one of: building, growing, stabilizing, refactoring, pivoting"
+  "summary": "2-3 sentences in documentary prose: what happened, WHY the team was doing it, and the broader context",
+  "key_activities": ["specific concrete activity with brief context", "another activity", "third activity"],
+  "mood": "one of: building, growing, stabilizing, refactoring, pivoting, experimenting",
+  "architectural_impact": "one sentence on any structural change made — or null if none",
+  "dominant_area": "primary focus area: frontend | backend | infrastructure | testing | documentation | full-stack"
 }`;
 
   try {
     const result = await callGroq({
-      systemPrompt: 'You are a technical historian analyzing software development. Respond ONLY with valid JSON.',
+      systemPrompt: 'You are a technical historian who writes insightful documentary analysis of software development history. Respond ONLY with valid JSON.',
       messages: [{ role: 'user', content: prompt }],
       json: true
     });
-    
+
     return {
       ...result,
       period: chunk.period,
       startDate: chunk.startDate,
       endDate: chunk.endDate,
-      commitCount: chunk.commitCount
+      commitCount: chunk.commitCount,
+      fileTypeStats: chunk.fileTypeStats,
+      architecturalSignals: chunk.architecturalSignals,
     };
   } catch (error) {
     if (error?.code === 'GROQ_QUOTA_COOLDOWN') {
@@ -158,7 +207,7 @@ Return a JSON object with this structure:
     } else {
       console.error('Error in phaseAgent:', error);
     }
-    
+
     return buildFallbackPhase(chunk);
   }
 }

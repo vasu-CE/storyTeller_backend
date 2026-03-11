@@ -158,6 +158,63 @@ export async function analyzeContributors(commits) {
       totalUniqueContributors: contributors.length,
       coreTeamSize: coreContributors.length,
       occasionalContributors: occasionalContributors.length
-    }
+    },
+    collaborationPeriods: analyzeCollaborationPeriods(commits),
+    busFactor: calculateBusFactor(contributors, totalCommits),
   };
+}
+
+/**
+ * Identifies calendar months where more than one contributor was simultaneously
+ * active (>= 2 commits each). Returns a chronological list of such periods.
+ */
+function analyzeCollaborationPeriods(commits) {
+  if (!commits || commits.length < 2) return [];
+
+  const monthMap = new Map();
+  for (const commit of commits) {
+    const d = new Date(commit.date);
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    if (!monthMap.has(key)) monthMap.set(key, new Map());
+
+    const authorKey = commit.author?.email || commit.author?.name || 'unknown';
+    const authorMap = monthMap.get(key);
+    authorMap.set(authorKey, (authorMap.get(authorKey) || 0) + 1);
+  }
+
+  const collaborationPeriods = [];
+
+  for (const [month, authorMap] of [...monthMap.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    const activeAuthors = [...authorMap.entries()].filter(([, count]) => count >= 2);
+    if (activeAuthors.length >= 2) {
+      collaborationPeriods.push({
+        month,
+        activeContributors: activeAuthors.length,
+        totalCommits: [...authorMap.values()].reduce((s, n) => s + n, 0),
+      });
+    }
+  }
+
+  return collaborationPeriods;
+}
+
+/**
+ * Bus factor = the minimum number of contributors whose combined commit count
+ * covers 50%+ of the total. A value of 1 signals a high-risk single point of
+ * knowledge concentration.
+ */
+function calculateBusFactor(contributors, totalCommits) {
+  if (!contributors || contributors.length === 0 || totalCommits === 0) return 1;
+
+  const sorted = [...contributors].sort((a, b) => b.commits - a.commits);
+  let cumulative = 0;
+
+  for (let i = 0; i < sorted.length; i++) {
+    cumulative += sorted[i].commits;
+    if (cumulative / totalCommits >= 0.5) {
+      return i + 1;
+    }
+  }
+
+  return sorted.length;
 }

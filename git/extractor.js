@@ -1,59 +1,63 @@
 import simpleGit from 'simple-git';
 import path from 'path';
 import fs from 'fs/promises';
-import { fileURLToPath } from 'url';
 import os from 'os';
 
-// const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// Optional depth cap — set GIT_MAX_COMMITS env var for shallow analysis on huge repos.
+// Default is 0 (no limit) to capture the entire Git history.
+const GIT_MAX_COMMITS = parseInt(process.env.GIT_MAX_COMMITS || '0', 10);
 
 export async function extractCommits(repoUrl) {
   const tempDir = path.join(os.tmpdir(), `git-repo-${Date.now()}`);
-  
+
   try {
     console.log(`Cloning repository: ${repoUrl}`);
     const git = simpleGit();
-    
-    // Clone the repository
-    await git.clone(repoUrl, tempDir, ['--depth', '500']); // Limit depth for faster cloning
-    
+
+    // Clone the full history unless a cap is configured via GIT_MAX_COMMITS.
+    const cloneArgs = [];
+    if (GIT_MAX_COMMITS > 0) {
+      cloneArgs.push('--depth', String(GIT_MAX_COMMITS));
+    }
+    await git.clone(repoUrl, tempDir, cloneArgs);
+
     const repoGit = simpleGit(tempDir);
-    
-    // Get commit log with detailed information
-    const log = await repoGit.log({
-      '--all': null,
-      '--numstat': null,
-      '--date': 'iso',
-    });
-    
-    // Extract detailed commit information
+
+    const logOptions = { '--all': null, '--date': 'iso' };
+    if (GIT_MAX_COMMITS > 0) {
+      logOptions['--max-count'] = GIT_MAX_COMMITS;
+    }
+    const log = await repoGit.log(logOptions);
+
     const commits = [];
     for (const commit of log.all) {
-      const stats = await repoGit.show([
-        '--numstat',
-        '--format=',
-        commit.hash
-      ]);
-      
+      const stats = await repoGit.show(['--numstat', '--format=', commit.hash]);
       const files = parseGitStats(stats);
-      
+      const allFiles = files.map(f => f.file);
+      const totalInsertions = files.reduce((sum, f) => sum + f.insertions, 0);
+      const totalDeletions  = files.reduce((sum, f) => sum + f.deletions, 0);
+
       commits.push({
         hash: commit.hash,
         message: commit.message,
-        author: {
-          name: commit.author_name,
-          email: commit.author_email
-        },
+        author: { name: commit.author_name, email: commit.author_email },
         date: commit.date,
         filesChanged: files.length,
-        insertions: files.reduce((sum, f) => sum + f.insertions, 0),
-        deletions: files.reduce((sum, f) => sum + f.deletions, 0),
-        files: files.map(f => f.file)
+        insertions: totalInsertions,
+        deletions: totalDeletions,
+        files: allFiles,
+        architecturalSignals: detectArchitecturalSignals(
+          allFiles, commit.message, totalInsertions, totalDeletions, files.length
+        ),
+        fileTypes: categorizeFileTypes(allFiles),
       });
     }
-    
+
     console.log(`Extracted ${commits.length} commits`);
-    
-    // Try to get  branches
+
+    // Derive first-occurrence events across the full sorted history.
+    const firstOccurrences = detectFirstOccurrences(commits);
+
     let branches = [];
     try {
       const branchResult = await repoGit.branch();
@@ -61,8 +65,7 @@ export async function extractCommits(repoUrl) {
     } catch (e) {
       console.warn('Could not extract branches:', e.message);
     }
-    
-    // Try to get tags
+
     let tags = [];
     try {
       const tagResult = await repoGit.tags();
@@ -70,17 +73,11 @@ export async function extractCommits(repoUrl) {
     } catch (e) {
       console.warn('Could not extract tags:', e.message);
     }
-    
-    return {
-      commits,
-      branches,
-      tags,
-      totalCommits: commits.length
-    };
-    
+
+    return { commits, branches, tags, totalCommits: commits.length, firstOccurrences };
+
   } catch (error) {
     console.error('Error extracting commits:', error);
-    
     if (error.message.includes('not found') || error.message.includes('404')) {
       throw new Error('Repository not found or is private');
     }
@@ -88,9 +85,8 @@ export async function extractCommits(repoUrl) {
       throw new Error('Repository requires authentication');
     }
     throw new Error(`Failed to clone repository: ${error.message}`);
-    
+
   } finally {
-    // Cleanup temp directory
     try {
       await fs.rm(tempDir, { recursive: true, force: true });
       console.log('Cleaned up temporary directory');
@@ -100,24 +96,203 @@ export async function extractCommits(repoUrl) {
   }
 }
 
+function detectArchitecturalSignals(files, message, insertions, deletions, filesChanged) {
+  const signals = new Set();
+  const msg = (message || '').toLowerCase();
+
+  for (const file of files) {
+    const lower = (file || '').toLowerCase();
+
+    if (
+      lower.endsWith('package.json') || lower.endsWith('requirements.txt') ||
+      lower.endsWith('pom.xml') || lower.endsWith('go.mod') ||
+      lower.endsWith('cargo.toml') || lower.endsWith('gemfile') ||
+      lower.endsWith('build.gradle') || lower.endsWith('pyproject.toml')
+    ) {
+      signals.add('dependency_change');
+    }
+
+    if (
+      lower.includes('.github/workflows') || lower.includes('jenkinsfile') ||
+      lower.includes('.gitlab-ci') || lower.includes('.travis.yml') ||
+      lower.includes('.circleci') || lower.includes('azure-pipelines')
+    ) {
+      signals.add('ci_cd');
+    }
+
+    if (
+      lower.includes('dockerfile') || lower.includes('docker-compose') ||
+      lower.includes('.dockerignore')
+    ) {
+      signals.add('containerization');
+    }
+
+    if (
+      lower.endsWith('.sql') || lower.includes('/migrations/') ||
+      lower.includes('migration') || lower.endsWith('.prisma') ||
+      lower.includes('/schema/') || lower.includes('alembic')
+    ) {
+      signals.add('database_migration');
+    }
+
+    if (
+      lower.includes('/test') || lower.includes('/spec') ||
+      lower.endsWith('.test.js') || lower.endsWith('.spec.ts') ||
+      lower.endsWith('.test.ts') || lower.endsWith('.test.py') ||
+      lower.includes('jest.config') || lower.includes('vitest') ||
+      lower.includes('cypress') || lower.includes('playwright')
+    ) {
+      signals.add('testing');
+    }
+
+    if (
+      lower.includes('k8s') || lower.includes('kubernetes') ||
+      lower.endsWith('.tf') || lower.includes('terraform') ||
+      lower.includes('helm') || lower.includes('ansible')
+    ) {
+      signals.add('infrastructure_as_code');
+    }
+
+    if (
+      lower.includes('security') || lower.includes('oauth') ||
+      lower.includes('jwt') || lower.includes('auth') ||
+      lower.includes('permission') || lower.includes('rbac') ||
+      lower.includes('cors') || lower.includes('csp')
+    ) {
+      signals.add('security');
+    }
+
+    if (
+      lower.endsWith('readme.md') || lower.includes('changelog') ||
+      lower.includes('/docs/') || lower.includes('contributing')
+    ) {
+      signals.add('documentation');
+    }
+  }
+
+  // Message-based signals
+  if (/refactor|rewrit|restructur|reorganiz|rearchitect|overhaul/i.test(msg)) {
+    signals.add('refactoring');
+  }
+  if (/\bbreaking[ -]change\b|break.*api|remove.*endpoint|deprecat.*api|\[breaking\]/i.test(msg)) {
+    signals.add('breaking_change');
+  }
+  if (/security|cve-?\d+|xss|sql.*inject|csrf|vulnerabilit|exploit/i.test(msg)) {
+    signals.add('security_fix');
+  }
+  if (/performance|optim|speed.?up|latency|throughput|cache/i.test(msg)) {
+    signals.add('performance');
+  }
+  if (/release|version|v\d+\.\d+|changelog|deploy/i.test(msg)) {
+    signals.add('release');
+  }
+  if (/^(init|initial commit|bootstrap|scaffold|setup|create project)/i.test(msg)) {
+    signals.add('foundation');
+  }
+
+  // Structural mass change
+  if (deletions > 200 && insertions > 200 && filesChanged > 10) {
+    signals.add('large_scale_change');
+  }
+
+  return [...signals];
+}
+
+// ---------------------------------------------------------------------------
+// File type categorisation per commit
+// ---------------------------------------------------------------------------
+
+function categorizeFileTypes(files) {
+  const types = { frontend: 0, backend: 0, tests: 0, config: 0, docs: 0, infra: 0, database: 0, styles: 0 };
+
+  for (const file of files) {
+    const lower = (file || '').toLowerCase();
+
+    if (lower.endsWith('.css') || lower.endsWith('.scss') || lower.endsWith('.sass') || lower.endsWith('.less')) {
+      types.styles++;
+    } else if (lower.includes('test') || lower.includes('spec')) {
+      types.tests++;
+    } else if (lower.endsWith('.md') || lower.includes('/docs/') || lower.includes('readme')) {
+      types.docs++;
+    } else if (
+      lower.includes('docker') || lower.includes('.github') || lower.includes('k8s') ||
+      lower.includes('terraform') || lower.endsWith('.yml') || lower.endsWith('.yaml')
+    ) {
+      types.infra++;
+    } else if (lower.endsWith('.sql') || lower.includes('migration') || lower.endsWith('.prisma') || lower.includes('/schema')) {
+      types.database++;
+    } else if (
+      lower.endsWith('package.json') || lower.endsWith('.config.js') || lower.endsWith('.config.ts') ||
+      lower.endsWith('.env.example') || lower.endsWith('.editorconfig') || lower.endsWith('.eslintrc') ||
+      lower.endsWith('.gitignore') || lower.endsWith('tsconfig.json') || lower.endsWith('.babelrc')
+    ) {
+      types.config++;
+    } else if (
+      lower.endsWith('.jsx') || lower.endsWith('.tsx') || lower.endsWith('.vue') || lower.endsWith('.svelte') ||
+      lower.includes('/components/') || lower.includes('/pages/') || lower.includes('/views/')
+    ) {
+      types.frontend++;
+    } else if (
+      lower.endsWith('.js') || lower.endsWith('.ts') || lower.endsWith('.py') || lower.endsWith('.go') ||
+      lower.endsWith('.rs') || lower.endsWith('.java') || lower.endsWith('.rb') || lower.endsWith('.php') ||
+      lower.endsWith('.cs') || lower.endsWith('.cpp') || lower.endsWith('.c') || lower.endsWith('.h')
+    ) {
+      types.backend++;
+    }
+  }
+
+  return types;
+}
+
+// ---------------------------------------------------------------------------
+// First-occurrence tracking across full history
+// ---------------------------------------------------------------------------
+
+const TRACKABLE_SIGNALS = [
+  'ci_cd', 'containerization', 'database_migration', 'testing',
+  'infrastructure_as_code', 'security', 'breaking_change', 'refactoring',
+  'performance', 'release', 'large_scale_change', 'dependency_change',
+  'security_fix', 'foundation',
+];
+
+function detectFirstOccurrences(commits) {
+  const sorted = [...commits].sort((a, b) => new Date(a.date) - new Date(b.date));
+  const firstOccurrences = {};
+
+  for (const commit of sorted) {
+    for (const signal of (commit.architecturalSignals || [])) {
+      if (TRACKABLE_SIGNALS.includes(signal) && !firstOccurrences[signal]) {
+        firstOccurrences[signal] = {
+          date: commit.date,
+          hash: commit.hash,
+          message: commit.message,
+          author: commit.author?.name,
+        };
+      }
+    }
+  }
+
+  return firstOccurrences;
+}
+
+// ---------------------------------------------------------------------------
+// Git numstat parser
+// ---------------------------------------------------------------------------
+
 function parseGitStats(stats) {
   const lines = stats.trim().split('\n').filter(line => line.trim());
   const files = [];
-  
+
   for (const line of lines) {
     const parts = line.split('\t');
     if (parts.length >= 3) {
-      const insertions = parseInt(parts[0]) || 0;
-      const deletions = parseInt(parts[1]) || 0;
-      const file = parts[2];
-      
       files.push({
-        file,
-        insertions,
-        deletions
+        file: parts[2],
+        insertions: parseInt(parts[0]) || 0,
+        deletions: parseInt(parts[1]) || 0,
       });
     }
   }
-  
+
   return files;
 }

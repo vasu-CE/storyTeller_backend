@@ -1,6 +1,6 @@
 import { extractCommits } from './git/extractor.js';
 import { chunkCommits } from './utils/chunkCommits.js';
-import { classifyCommits } from './utils/commitClassifier.js';
+import { classifyCommits, detectArchitecturalChanges, detectStabilizationPeriods, calculateCommitVelocity } from './utils/commitClassifier.js';
 import { analyzePhase } from './agents/phaseAgent.js';
 import { detectMilestones } from './agents/milestoneAgent.js';
 import { generateNarrative } from './agents/narrativeAgent.js';
@@ -14,7 +14,7 @@ export async function analyzePipeline(repoUrl, progressCallback = null) {
       progressCallback({ step: 'extracting', message: 'Cloning repository and extracting commits...' });
     }
     
-    const { commits, branches, tags } = await extractCommits(repoUrl);
+    const { commits, branches, tags, firstOccurrences } = await extractCommits(repoUrl);
     
     if (!commits || commits.length === 0) {
       throw new Error('No commits found in repository');
@@ -34,6 +34,17 @@ export async function analyzePipeline(repoUrl, progressCallback = null) {
     
     // Step 3: Classify commits
     const classification = classifyCommits(commits);
+    // Attach architectural changes + stabilisation periods if not already present
+    // (classifyCommits already computes these, but ensure signal-enriched commits are used)
+    if (!classification.architecturalChanges) {
+      classification.architecturalChanges = detectArchitecturalChanges(commits);
+    }
+    if (!classification.stabilizationPeriods) {
+      classification.stabilizationPeriods = detectStabilizationPeriods(commits);
+    }
+    if (!classification.velocityData) {
+      classification.velocityData = calculateCommitVelocity(commits);
+    }
     
     // Step 4: Analyze phases (process each chunk)
     const phases = [];
@@ -59,7 +70,11 @@ export async function analyzePipeline(repoUrl, progressCallback = null) {
       progressCallback({ step: 'milestones', message: 'Detecting major milestones...' });
     }
     
-    const milestones = await detectMilestones(phases, commits);
+    const milestones = await detectMilestones(phases, commits, {
+      tags,
+      firstOccurrences,
+      classification,
+    });
     await sleep(300);
     
     // Step 6: Generate narrative
@@ -67,15 +82,25 @@ export async function analyzePipeline(repoUrl, progressCallback = null) {
       progressCallback({ step: 'narrative', message: 'Writing project story...' });
     }
     
-    const narrative = await generateNarrative(phases, milestones);
-    await sleep(300);
-    
-    // Step 7: Analyze contributors
+    // Step 7: Contributors (must run before narrative to provide collaboration context)
     if (progressCallback) {
       progressCallback({ step: 'contributors', message: 'Analyzing contributors...' });
     }
     
     const contributors = await analyzeContributors(commits);
+    await sleep(300);
+
+    // Step 6 (deferred): Generate narrative with full enriched context
+    if (progressCallback) {
+      progressCallback({ step: 'narrative', message: 'Writing project story...' });
+    }
+
+    // Generate narrative with full enriched context: contributors, classification, firstOccurrences
+    const narrative = await generateNarrative(phases, milestones, {
+      contributors,
+      classification,
+      firstOccurrences,
+    });
     
     // Compile final result
     const repoMeta = {
@@ -97,7 +122,11 @@ export async function analyzePipeline(repoUrl, progressCallback = null) {
       phases,
       milestones,
       contributors,
-      classification: classification.summary
+      classification: classification.summary,
+      architecturalChanges: classification.architecturalChanges,
+      stabilizationPeriods: classification.stabilizationPeriods,
+      velocityData: classification.velocityData,
+      firstOccurrences,
     };
     
     if (progressCallback) {
