@@ -9,33 +9,47 @@ const groq = new Groq({
 
 let quotaCooldownUntilMs = 0;
 
-export async function callGroq(prompt, systemPrompt = 'You are a helpful assistant that responds ONLY with valid JSON. No markdown, no explanations, just pure JSON.', retries = 2) {
+const DEFAULT_JSON_SYSTEM_PROMPT = 'You are a helpful assistant that responds ONLY with valid JSON. No markdown, no explanations, just pure JSON.';
+
+export async function callGroq(options) {
+  const {
+    systemPrompt = DEFAULT_JSON_SYSTEM_PROMPT,
+    messages = [],
+    json = true,
+    max_tokens = 1500,
+    retries = 2,
+    temperature = 0.7
+  } = options || {};
+
   if (Date.now() < quotaCooldownUntilMs) {
     const retryInMs = quotaCooldownUntilMs - Date.now();
     throw createQuotaCooldownError(retryInMs);
   }
+
+  const requestMessages = [
+    {
+      role: 'system',
+      content: systemPrompt
+    },
+    ...messages
+  ];
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       console.log(`Calling Groq API (attempt ${attempt + 1}/${retries + 1})...`);
       
       const completion = await groq.chat.completions.create({
-        messages: [
-          {
-            role: 'system',
-            content: systemPrompt
-          },
-          {
-            role: 'user',
-            content: prompt
-          }
-        ],
+        messages: requestMessages,
         model: 'llama-3.3-70b-versatile',
-        temperature: 0.7,
-        max_tokens: 2000,
+        temperature,
+        max_tokens,
       });
       
       let responseText = completion.choices[0]?.message?.content || '{}';
+
+      if (!json) {
+        return responseText.trim();
+      }
       
       // Strip markdown code fences if present
       responseText = responseText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
@@ -77,11 +91,6 @@ export async function callGroq(prompt, systemPrompt = 'You are a helpful assista
   }
 }
 
-/**
- * Sleep utility for delays
- * @param {number} ms - Milliseconds to sleep
- * @returns {Promise<void>}
- */
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }

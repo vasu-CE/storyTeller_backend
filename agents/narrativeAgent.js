@@ -113,10 +113,11 @@ Return a JSON object with this structure:
 }`;
 
   try {
-    const result = await callGroq(
-      prompt,
-      'You are a technical storyteller crafting engaging narratives about software projects. Respond ONLY with valid JSON.'
-    );
+    const result = await callGroq({
+      systemPrompt: 'You are a technical storyteller crafting engaging narratives about software projects. Respond ONLY with valid JSON.',
+      messages: [{ role: 'user', content: prompt }],
+      json: true
+    });
 
     return {
       ...result,

@@ -100,11 +100,6 @@ export async function extractCommits(repoUrl) {
   }
 }
 
-/**
- * Parse git numstat output
- * @param {string} stats - Raw numstat output 
- * @returns {Array} Array of file change objects
- */
 function parseGitStats(stats) {
   const lines = stats.trim().split('\n').filter(line => line.trim());
   const files = [];

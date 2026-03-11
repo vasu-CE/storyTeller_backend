@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import analyzeRoutes from './routes/analyze.js';
+import chatRoutes from './routes/chat.js';
 
 dotenv.config();
 
@@ -18,6 +19,7 @@ app.use(express.urlencoded({ extended: true }));
 
 // Routes
 app.use('/api', analyzeRoutes);
+app.use('/api', chatRoutes);
 
 // Root endpoint
 app.get('/', (req, res) => {
@@ -26,7 +28,8 @@ app.get('/', (req, res) => {
     version: '1.0.0',
     endpoints: {
       health: 'GET /api/health',
-      analyze: 'POST /api/analyze'
+      analyze: 'POST /api/analyze',
+      chat: 'POST /api/chat'
     }
   });
 });
@@ -46,6 +49,7 @@ app.listen(PORT, () => {
   console.log(`📊 API endpoints:`);
   console.log(`   - GET  /api/health`);
   console.log(`   - POST /api/analyze`);
+  console.log(`   - POST /api/chat`);
   
   if (!process.env.GROQ_API_KEY) {
     console.warn('⚠️  GROQ_API_KEY not set in .env file');
