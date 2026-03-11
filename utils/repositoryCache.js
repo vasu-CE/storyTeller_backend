@@ -75,7 +75,7 @@ function createSessionResult(analysisData, cacheMetadata) {
   };
 
   saveContext(sessionId, result);
-  return result;
+  return { sessionId, result };
 }
 
 export async function getCachedAnalysis(repoUrl, options = {}) {
@@ -107,10 +107,12 @@ export async function getCachedAnalysis(repoUrl, options = {}) {
   }
 
   const cacheMetadata = buildCacheMetadata(record, 'database');
-  return {
-    record,
-    result: createSessionResult(record.analysisData, cacheMetadata),
-  };
+  const { sessionId, result } = createSessionResult(record.analysisData, cacheMetadata);
+  await prisma.repositoryAnalysis.update({
+    where: { id: record.id },
+    data: { sessionId },
+  });
+  return { record, result };
 }
 
 export async function storeAnalysisResult(repoUrl, analysisResult) {
@@ -163,10 +165,31 @@ export async function storeAnalysisResult(repoUrl, analysisResult) {
   });
 
   const cacheMetadata = buildCacheMetadata(record, 'fresh-analysis');
-  return {
-    record,
-    result: createSessionResult(persistedAnalysis, cacheMetadata),
+  const { sessionId, result } = createSessionResult(persistedAnalysis, cacheMetadata);
+  await prisma.repositoryAnalysis.update({
+    where: { id: record.id },
+    data: { sessionId },
+  });
+  return { record, result };
+}
+
+export async function restoreContextBySessionId(sessionId) {
+  if (!sessionId) return null;
+
+  const record = await prisma.repositoryAnalysis.findUnique({
+    where: { sessionId },
+  });
+
+  if (!record) return null;
+
+  const cacheMetadata = buildCacheMetadata(record, 'database');
+  const result = {
+    ...record.analysisData,
+    sessionId,
+    cache: cacheMetadata,
   };
+  saveContext(sessionId, result);
+  return result;
 }
 
 export async function listStoredRepositories() {

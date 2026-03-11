@@ -1,6 +1,7 @@
 import { getContext } from '../store/contextStore.js';
 import { buildContext } from '../utils/buildContext.js';
 import { callGroq } from '../utils/groqClient.js';
+import { restoreContextBySessionId } from '../utils/repositoryCache.js';
 
 function sanitizeHistory(history) {
   if (!Array.isArray(history)) {
@@ -14,7 +15,11 @@ function sanitizeHistory(history) {
 }
 
 export async function chatAgent(sessionId, userQuestion, conversationHistory = []) {
-  const context = getContext(sessionId);
+  let context = getContext(sessionId);
+
+  if (!context) {
+    context = await restoreContextBySessionId(sessionId);
+  }
 
   if (!context) {
     const error = new Error('Session not found. Please re-analyze the repository.');

@@ -10,6 +10,9 @@ const groq = new Groq({
 let quotaCooldownUntilMs = 0;
 
 const DEFAULT_JSON_SYSTEM_PROMPT = 'You are a helpful assistant that responds ONLY with valid JSON. No markdown, no explanations, just pure JSON.';
+const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434';
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'llama3';
+const OLLAMA_TIMEOUT_MS = Number.parseInt(process.env.OLLAMA_TIMEOUT_MS || '30000', 10);
 
 export async function callGroq(options) {
   const {
@@ -23,7 +26,17 @@ export async function callGroq(options) {
 
   if (Date.now() < quotaCooldownUntilMs) {
     const retryInMs = quotaCooldownUntilMs - Date.now();
-    throw createQuotaCooldownError(retryInMs);
+    try {
+      return await callOllama({
+        systemPrompt,
+        messages,
+        json,
+        max_tokens,
+        temperature
+      });
+    } catch (fallbackError) {
+      throw createQuotaCooldownError(retryInMs, fallbackError);
+    }
   }
 
   const requestMessages = [
@@ -86,8 +99,80 @@ export async function callGroq(options) {
         continue;
       }
       
-      throw error;
+      try {
+        return await callOllama({
+          systemPrompt,
+          messages,
+          json,
+          max_tokens,
+          temperature
+        });
+      } catch (fallbackError) {
+        if (!error.cause) {
+          error.cause = fallbackError;
+        }
+        throw error;
+      }
     }
+  }
+}
+
+async function callOllama(options) {
+  const {
+    systemPrompt,
+    messages = [],
+    json = true,
+    max_tokens = 1500,
+    temperature = 0.7
+  } = options || {};
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), OLLAMA_TIMEOUT_MS);
+
+  const requestMessages = [
+    {
+      role: 'system',
+      content: systemPrompt
+    },
+    ...messages
+  ];
+
+  try {
+    console.log(`Using local Ollama fallback model: ${OLLAMA_MODEL}`);
+    const response = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: OLLAMA_MODEL,
+        stream: false,
+        format: json ? 'json' : undefined,
+        options: {
+          temperature,
+          num_predict: max_tokens
+        },
+        messages: requestMessages
+      })
+    });
+    
+    if (!response.ok) {
+      const responseText = await response.text();
+      throw new Error(`Ollama fallback failed (${response.status}): ${responseText.substring(0, 200)}`);
+    }
+
+    const payload = await response.json();
+    let responseText = payload?.message?.content || '{}';
+
+    if (!json) {
+      return String(responseText).trim();
+    }
+
+    responseText = String(responseText).replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    return JSON.parse(responseText);
+  } finally {
+    clearTimeout(timeout);
   }
 }
 

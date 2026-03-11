@@ -23,6 +23,7 @@ model RepositoryAnalysis {
   lastKnownHeadHash String?
   lastCheckedAt     DateTime?
   analysisData      Json
+  sessionId         String?  @unique
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
