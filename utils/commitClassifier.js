@@ -114,7 +114,12 @@ export function classifyCommits(commits) {
     }
 
     if (!classified) {
-      classification.other.push(commit);
+      const fallbackType = inferCommitTypeFromDiff(commit);
+      if (fallbackType && classification[fallbackType]) {
+        classification[fallbackType].push(commit);
+      } else {
+        classification.other.push(commit);
+      }
     }
   }
 
@@ -134,6 +139,68 @@ export function classifyCommits(commits) {
     codeChangeInterpretation,
     total: commits.length,
   };
+}
+
+function inferCommitTypeFromDiff(commit) {
+  const interpretationCategories = commit?.codeChangeInterpretation?.categories || [];
+  const signals = commit?.architecturalSignals || [];
+  const files = Array.isArray(commit?.files) ? commit.files.map((f) => String(f).toLowerCase()) : [];
+  const fileTypes = commit?.fileTypes || {};
+  const insertions = Number(commit?.insertions) || 0;
+  const deletions = Number(commit?.deletions) || 0;
+
+  if (interpretationCategories.includes('infrastructure_or_build_system_changes') || signals.includes('ci_cd')) {
+    return 'ci';
+  }
+
+  if (
+    interpretationCategories.includes('configuration_updates') ||
+    signals.includes('dependency_change') ||
+    files.some((f) => f.endsWith('package.json') || f.includes('lock') || f.endsWith('requirements.txt') || f.endsWith('pom.xml'))
+  ) {
+    return 'deps';
+  }
+
+  if (
+    interpretationCategories.includes('test_suite_additions') ||
+    signals.includes('testing') ||
+    (fileTypes.tests || 0) > 0 ||
+    files.some((f) => f.includes('/test') || f.includes('/spec') || /\.test\.|\.spec\./.test(f))
+  ) {
+    return 'test';
+  }
+
+  if (
+    interpretationCategories.includes('large_scale_refactoring') ||
+    interpretationCategories.includes('file_restructuring') ||
+    signals.includes('refactoring') ||
+    signals.includes('large_scale_change') ||
+    deletions > insertions * 1.2
+  ) {
+    return 'refactor';
+  }
+
+  if (
+    signals.includes('security_fix') ||
+    signals.includes('security') ||
+    files.some((f) => /security|auth|jwt|oauth|permission|rbac/.test(f))
+  ) {
+    return 'security';
+  }
+
+  if (
+    interpretationCategories.includes('new_module_or_component_introduction') ||
+    insertions > deletions * 1.4 ||
+    (fileTypes.frontend || 0) + (fileTypes.backend || 0) >= 3
+  ) {
+    return 'feat';
+  }
+
+  if ((fileTypes.docs || 0) > 0 && (fileTypes.backend || 0) + (fileTypes.frontend || 0) === 0) {
+    return 'docs';
+  }
+
+  return null;
 }
 
 export function analyzeCodeChangeInterpretation(commits) {
