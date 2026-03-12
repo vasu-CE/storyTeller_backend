@@ -87,15 +87,27 @@ docker compose up -d
 
 Starts Postgres on `localhost:5431` using values from `docker-compose.yml`.
 
+Apply Prisma schema (first-time setup):
+
+```bash
+npx prisma migrate deploy
+```
+
 #### Option B — Local PostgreSQL
 
 Create a `story_teller` database in your local Postgres instance, then update `DATABASE_URL` in `.env` accordingly.
+
+Then run:
+
+```bash
+npx prisma migrate deploy
+```
 
 ---
 
 ### 5 · Ollama Local Model *(optional)*
 
-Skip this step if you are not using a local model fallback.
+Skip this step if you don't want local model for fallback.
 
 **Install and pull a model:**
 ```bash
@@ -138,5 +150,6 @@ cd Backend
 npm install
 cp .env.example .env   # edit this file before continuing
 docker compose up -d
-node index.js
+npx prisma migrate deploy
+npm run dev
 ```
