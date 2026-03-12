@@ -14,19 +14,20 @@ export async function analyzePipeline(repoUrl, progressCallback = null) {
       progressCallback({ step: 'extracting', message: 'Cloning repository and extracting commits...' });
     }
     
-    const { commits, branches, tags, firstOccurrences } = await extractCommits(repoUrl);
+    const { commits, branches, tags, totalCommits, firstOccurrences } = await extractCommits(repoUrl);
+    const commitCount = Number.isFinite(totalCommits) ? totalCommits : commits.length;
     
     if (!commits || commits.length === 0) {
       throw new Error('No commits found in repository');
     }
     
-    if (commits.length < 5) {
+    if (commitCount < 5) {
       throw new Error('Repository has too few commits for meaningful analysis (minimum 5 required)');
     }
     
     // Step 2: Chunk commits
     if (progressCallback) {
-      progressCallback({ step: 'chunking', message: `Processing ${commits.length} commits...` });
+      progressCallback({ step: 'chunking', message: `Processing ${commitCount} commits...` });
     }
     
     const chunks = chunkCommits(commits);
@@ -34,17 +35,6 @@ export async function analyzePipeline(repoUrl, progressCallback = null) {
     
     // Step 3: Classify commits
     const classification = classifyCommits(commits);
-    // Attach architectural changes + stabilisation periods if not already present
-    // (classifyCommits already computes these, but ensure signal-enriched commits are used)
-    if (!classification.architecturalChanges) {
-      classification.architecturalChanges = detectArchitecturalChanges(commits);
-    }
-    if (!classification.stabilizationPeriods) {
-      classification.stabilizationPeriods = detectStabilizationPeriods(commits);
-    }
-    if (!classification.velocityData) {
-      classification.velocityData = calculateCommitVelocity(commits);
-    }
     
     // Step 4: Analyze phases (process each chunk)
     const phases = [];
@@ -105,7 +95,7 @@ export async function analyzePipeline(repoUrl, progressCallback = null) {
     // Compile final result
     const repoMeta = {
       url: repoUrl,
-      totalCommits: commits.length,
+      totalCommits: commitCount,
       latestCommitHash: commits[0]?.hash || null,
       branches,
       tags,
